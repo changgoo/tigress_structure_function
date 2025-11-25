@@ -12,10 +12,14 @@ tMyr = (ac.pc / (au.km / au.s)).to("Myr").value
 class TigressPickle(object):
     def __init__(self, fname, axis="z", verbose=False):
         self.read_tigress_pickle(fname, axis=axis)
+        if hasattr(self, "N_HI"):
+            self.model = "NCR"
+        else:
+            self.model = "classic"
         self.verbose = verbose
 
     def __repr__(self):
-        out = "TIGRESS pickle output:"
+        out = f"TIGRESS-{self.model} pickle output:"
         out += f" ({self.domain["Nx"]}x{self.domain["Ny"]}) data"
         out += f" at time={self.time}"
         if self.verbose:
@@ -71,17 +75,36 @@ class TigressPickle(object):
         # read the original pickle file using pandas
         data = pd.read_pickle(fname)
 
-        # extract time information
-        self.tMyr = data["time"]  # in Myr
-        self.time = self.tMyr / tMyr  # in the code unit [pc/(km/s)]
 
-        # extrad surface density
-        self.surf = data[axis]["data"]  # in Msun/pc^2
-        # convert surface density to column density (cm^-2)
-        self.NH = (self.surf * ac.M_sun / ac.pc**2 / (1.4271 * ac.m_p)).to("cm-2").value
+        if "data" in data[axis]:
+            # extract time information
+            self.tMyr = data["time"]  # in Myr
+            self.time = self.tMyr / tMyr  # in the code unit [pc/(km/s)]
+            # extrad surface density
+            self.surf = data[axis]["data"]  # in Msun/pc^2
+            # convert surface density to column density (cm^-2)
+            self.NH = (self.surf * ac.M_sun / ac.pc**2 / (1.4271 * ac.m_p)).to("cm-2").value
+        elif "Sigma_gas" in data[axis]:
+            # extract time information
+            self.time = data["time"]  # in the code unit [pc/(km/s)]
+            self.tMyr = self.time * tMyr  # in Myr
+            # extract all fields
+            fields = list(data[axis].keys())
+            NHconv = (ac.M_sun / ac.pc**2 / (1.4 * ac.m_p)).to("cm-2").value
+            for f in fields:
+                setattr(self, f, data[axis][f])
+                if f.startswith("Sigma"):
+                    # convert surface density to column density (cm^-2)
+                    setattr(self, f"N_{f.split('_')[-1]}", data[axis][f]* NHconv)
+            self.surf = self.Sigma_gas  # in Msun/pc^2
+            self.NH = self.N_gas # in cm^-2
+
 
         # extract domain information
-        xmin, xmax, ymin, ymax = data[axis]["bounds"]
+        if "bounds" in data[axis]:
+            xmin, xmax, ymin, ymax = data[axis]["bounds"]
+        elif "extent" in data:
+            xmin, xmax, ymin, ymax = data["extent"][axis]
         self.domain = dict(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
         Lx = xmax - xmin
         Ly = ymax - ymin
@@ -99,7 +122,13 @@ class TigressPickle(object):
         self.coords_f = dict(yfc=yfc, xfc=xfc)
 
     def to_xarray(self):
-        return xr.DataArray(self.surf, coords=self.coords)
+        if self.model == "classic":
+            return xr.DataArray(self.surf, coords=self.coords)
+        elif self.model == "NCR":
+            dset = xr.Dataset()
+            for f in ["Sigma_gas", "Sigma_HI", "Sigma_H2", "Sigma_HII"]:
+                dset[f] = xr.DataArray(getattr(self, f), coords=self.coords)
+            return dset
 
     def get_yshear(self, qshear=1, Omega=0.028):
         Lx = self.domain["Lx"]
